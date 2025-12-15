@@ -1,28 +1,30 @@
 import os
 import csv
 import requests
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-ZENLOOP_BASE = "https://api.zenloop.com/external_app/v1"  # :contentReference[oaicite:1]{index=1}
+ZENLOOP_BASE = "https://api.zenloop.com/v1"  # :contentReference[oaicite:2]{index=2}
 
 def zl_get(path, token, params=None):
     r = requests.get(
         ZENLOOP_BASE + path,
         headers={
-            "Authorization": f"Bearer {token}",  # :contentReference[oaicite:2]{index=2}
+            "Authorization": f"Bearer {token}",  # :contentReference[oaicite:3]{index=3}
             "accept": "application/json",
         },
         params=params,
         timeout=30,
     )
-    r.raise_for_status()
+    # Damit wir beim nächsten Fehler sofort mehr sehen als nur "403":
+    if r.status_code >= 400:
+        raise RuntimeError(f"Zenloop API error {r.status_code}: {r.text}")
     return r.json()
 
 def list_all_surveys(token):
     surveys = []
     page = 1
     while True:
-        data = zl_get("/surveys", token, params={"page": page})  # :contentReference[oaicite:3]{index=3}
+        data = zl_get("/surveys", token, params={"page": page})  # :contentReference[oaicite:4]{index=4}
         surveys.extend(data.get("surveys", []))
         meta = data.get("meta", {})
         total = meta.get("total")
@@ -34,49 +36,54 @@ def list_all_surveys(token):
         page += 1
     return surveys
 
-def get_survey_summary(token, survey_id, date_shortcut):
-    return zl_get(f"/surveys/{survey_id}", token, params={"date_shortcut": date_shortcut})  # :contentReference[oaicite:4]{index=4}
+def get_answers_count_last_7d(token, survey_id):
+    # Wir zählen nicht alle Antworten, sondern holen nur "total" via per_page=1
+    since = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat().replace("+00:00", "Z")
+    data = zl_get(
+        f"/surveys/{survey_id}/answers",
+        token,
+        params={"date_from": since, "page": 1, "per_page": 1},
+    )
+    return int((data.get("meta") or {}).get("total", 0))
+
+def get_overall_nps_and_total(token, survey_id):
+    # Summary eines Surveys: enthält u.a. number_of_responses und NPS-Objekt (je nach Account)
+    data = zl_get(f"/surveys/{survey_id}", token, params={"date_shortcut": "all_time"})
+    survey = data.get("survey", {})
+    total = int(survey.get("number_of_responses", 0))
+    nps = (survey.get("nps") or {}).get("percentage")
+    nps_score = float(nps) if nps is not None else None
+    return nps_score, total
 
 def main():
     token = os.environ["ZENLOOP_API_TOKEN"]
-
     run_at = datetime.now(timezone.utc).date().isoformat()
 
     surveys = list_all_surveys(token)
 
-    total_all_time = 0
-    weighted_nps_sum = 0.0
     weekly_new = 0
+    total_all = 0
+    weighted_sum = 0.0
 
     for s in surveys:
-        sid = s.get("public_hash_id") or s.get("id")  # :contentReference[oaicite:5]{index=5}
+        sid = s.get("id") or s.get("public_hash_id")  # Doku zeigt Bearer-Auth /v1/surveys :contentReference[oaicite:5]{index=5}
         if not sid:
             continue
 
-        all_time = get_survey_summary(token, sid, "all_time")
-        last_7d = get_survey_summary(token, sid, "last_7_days")
+        nps_score, total = get_overall_nps_and_total(token, sid)
+        weekly = get_answers_count_last_7d(token, sid)
 
-        survey_all = all_time.get("survey", {})
-        survey_7d = last_7d.get("survey", {})
+        weekly_new += weekly
+        total_all += total
+        if nps_score is not None and total > 0:
+            weighted_sum += nps_score * total
 
-        n_all = int(survey_all.get("number_of_responses", 0))  # :contentReference[oaicite:6]{index=6}
-        n_7d = int(survey_7d.get("number_of_responses", 0))
-
-        nps = (survey_all.get("nps") or {}).get("percentage")  # :contentReference[oaicite:7]{index=7}
-        nps_score = float(nps) if nps is not None else None
-
-        total_all_time += n_all
-        weekly_new += n_7d
-
-        if nps_score is not None and n_all > 0:
-            weighted_nps_sum += nps_score * n_all
-
-    overall_score = round(weighted_nps_sum / total_all_time, 2) if total_all_time > 0 else None
+    overall_score = round(weighted_sum / total_all, 2) if total_all > 0 else None
 
     with open("weekly_summary_zenloop.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(["run_at", "source", "scope", "weekly_new", "total_feedbacks", "overall_score"])
-        w.writerow([run_at, "zenloop", "ALL", weekly_new, total_all_time, overall_score])
+        w.writerow([run_at, "zenloop", "ALL", weekly_new, total_all, overall_score])
 
 if __name__ == "__main__":
     main()
