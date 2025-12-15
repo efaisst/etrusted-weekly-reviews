@@ -54,7 +54,7 @@ def main():
         ])
 
         for s in surveys:
-            sid = s.get("id")
+            sid = s.get("public_hash_id") or s.get("id")
             name = s.get("name", sid)
 
             weekly = get_weekly_count(token, sid)
