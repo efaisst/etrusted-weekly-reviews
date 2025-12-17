@@ -1,4 +1,4 @@
-name: Weekly Trusted Shops Update
+name: Weekly Review Monitoring
 
 on:
   schedule:
