@@ -19,18 +19,46 @@ def zl_get(path, token, params=None):
         raise RuntimeError(f"{r.status_code}: {r.text}")
     return r.json()
 
+def list_all_surveys(token):
+    """Fetch ALL surveys using pagination."""
+    surveys = []
+    page = 1
+
+    while True:
+        data = zl_get("/surveys", token, params={"page": page})
+        page_surveys = data.get("surveys", [])
+        surveys.extend(page_surveys)
+
+        meta = data.get("meta", {}) or {}
+        total = meta.get("total")
+        per_page = meta.get("per_page")
+
+        # If API doesn't return paging meta, stop.
+        if not total or not per_page:
+            break
+
+        # Stop when we've fetched all items.
+        if page * per_page >= total:
+            break
+
+        page += 1
+
+    return surveys
+
 def get_weekly_count(token, survey_id):
+    """Count answers in the last 7 days (fast: per_page=1 and read meta.total)."""
     since = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat().replace("+00:00", "Z")
     data = zl_get(
         f"/surveys/{survey_id}/answers",
         token,
-        params={"date_from": since, "per_page": 1},
+        params={"date_from": since, "page": 1, "per_page": 1},
     )
     return int((data.get("meta") or {}).get("total", 0))
 
 def get_survey_totals(token, survey_id):
+    """Get all-time totals + NPS."""
     data = zl_get(f"/surveys/{survey_id}", token, params={"date_shortcut": "all_time"})
-    survey = data.get("survey", {})
+    survey = data.get("survey", {}) or {}
     total = int(survey.get("number_of_responses", 0))
     nps = (survey.get("nps") or {}).get("percentage")
     return total, nps
@@ -39,7 +67,7 @@ def main():
     token = os.environ["ZENLOOP_API_TOKEN"]
     run_at = datetime.now(timezone.utc).date().isoformat()
 
-    surveys = zl_get("/surveys", token).get("surveys", [])
+    surveys = list_all_surveys(token)
 
     with open("weekly_summary_zenloop_surveys.csv", "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -55,7 +83,10 @@ def main():
 
         for s in surveys:
             sid = s.get("public_hash_id") or s.get("id")
-            name = s.get("name", sid)
+            if not sid:
+                continue
+
+            name = s.get("name") or s.get("title") or sid
 
             weekly = get_weekly_count(token, sid)
             total, nps = get_survey_totals(token, sid)
